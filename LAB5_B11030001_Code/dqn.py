@@ -95,6 +95,17 @@ class CNNDQN(nn.Module):
     def forward(self, x):
         return self.network(x)
 
+class DQNLoss(nn.Module):
+    def __init__(self, gamma):
+        super().__init__()
+        self.gamma = gamma
+    def forward(self, rewards, q_values, gamma_multiplier):
+        loss = (rewards + self.gamma * gamma_multiplier - q_values) ** 2
+        loss *= 0.5
+        loss = torch.mean(loss, dim=0, keepdim=False)
+
+        return loss
+
 
 class AtariPreprocessor:
     """
@@ -173,12 +184,15 @@ class DQNAgent:
 
         self.q_net = FCNDQN(self.num_actions).to(self.device) if self.task == 1 \
             else CNNDQN(self.num_actions).to(self.device)
+
+        
         self.q_net.apply(init_weights)
         
         self.target_net = FCNDQN(self.num_actions).to(self.device) if self.task == 1 \
             else CNNDQN(self.num_actions).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
 
+        self.dqn_type = args.dqn_type
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=args.lr)
 
         self.batch_size = args.batch_size
@@ -187,9 +201,11 @@ class DQNAgent:
         self.epsilon_decay = args.epsilon_decay
         self.epsilon_min = args.epsilon_min
 
+        self.loss = DQNLoss(self.gamma)
+
         self.env_count = 0
         self.train_count = 0
-        self.best_reward = 0  # Initilized to 0 for CartPole and to -21 for Pong
+        self.best_reward = 0 if self.task == 1 else -21  # 0 for CartPole, -21 for Pong
         self.max_episode_steps = args.max_episode_steps
         self.replay_start_size = args.replay_start_size
         self.target_update_frequency = args.target_update_frequency
@@ -206,7 +222,13 @@ class DQNAgent:
     def select_action(self, state):
         if random.random() < self.epsilon:
             return random.randint(0, self.num_actions - 1)
-        state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
+
+        # B11030001
+        if self.task != 1:
+            state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device) / 255.0
+        else:
+            state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
+            
         with torch.no_grad():
             q_values = self.q_net(state_tensor)
         return q_values.argmax().item()
@@ -272,7 +294,7 @@ class DQNAgent:
             
             ########## END OF YOUR CODE ##########  
             if ep % 100 == 0:
-                model_path = os.path.join(self.save_dir, f"model_ep{ep}.pt")
+                model_path = os.path.join(self.save_dir, f"task{self.task}_model_ep{ep}.pt")
                 torch.save(self.q_net.state_dict(), model_path)
                 print(f"Saved model checkpoint to {model_path}")
 
@@ -280,7 +302,7 @@ class DQNAgent:
                 eval_reward = self.evaluate()
                 if eval_reward > self.best_reward:
                     self.best_reward = eval_reward
-                    model_path = os.path.join(self.save_dir, "best_model.pt")
+                    model_path = os.path.join(self.save_dir, f"task{self.task}_best_model.pt")
                     torch.save(self.q_net.state_dict(), model_path)
                     print(f"Saved new best model to {model_path} with reward {eval_reward}")
                 print(f"[TrueEval] Ep: {ep} Eval Reward: {eval_reward:.2f} SC: {self.env_count} UC: {self.train_count}")
@@ -303,7 +325,13 @@ class DQNAgent:
         total_reward = 0
 
         while not done:
-            state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
+
+            #B11030001
+            if self.task != 1:
+                state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device) / 255.0
+            else:
+                state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
+
             with torch.no_grad():
                 action = self.q_net(state_tensor).argmax().item()
             next_obs, reward, terminated, truncated, _ = self.test_env.step(action)
@@ -344,8 +372,13 @@ class DQNAgent:
 
         # Convert the states, actions, rewards, next_states, and dones into torch tensors
         # NOTE: Enable this part after you finish the mini-batch sampling
-        states = torch.from_numpy(np.array(states).astype(np.float32)).to(self.device)
-        next_states = torch.from_numpy(np.array(next_states).astype(np.float32)).to(self.device)
+        # B11030001
+        if self.task != 1:
+            states = torch.from_numpy(np.array(states)).float().to(self.device) / 255.0
+            next_states = torch.from_numpy(np.array(next_states)).float().to(self.device) / 255.0
+        else:
+            states = torch.from_numpy(np.array(states).astype(np.float32)).to(self.device)
+            next_states = torch.from_numpy(np.array(next_states).astype(np.float32)).to(self.device)
         actions = torch.tensor(actions, dtype=torch.int64).to(self.device)
         rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).to(self.device)
@@ -353,19 +386,18 @@ class DQNAgent:
         
         ########## YOUR CODE HERE (~10 lines) ##########
         # Implement the loss function of DQN and the gradient updates 
-
-        # B11030001
-        if self.task != 1:
-            states = torch.from_numpy(np.array(states)).float().to(self.device) / 255.0
-            next_states = torch.from_numpy(np.array(next_states)).float().to(self.device) / 255.0
         
+        # B11030001
         with torch.no_grad():
-            target_q_values = self.target_net(next_states).max(dim=1)[0]
-            target_q_values = target_q_values * (1 - dones)
+            if self.dqn_type == "DQN":
+                target_q_values = self.target_net(next_states).max(dim=1)[0]
+                gamma_multiplier = target_q_values * (1 - dones)
+            else:
+                target_actions = self.q_net(next_states).argmax(dim=1)
+                gamma_multiplier = self.target_net(next_states).gather(1, target_actions.unsqueeze(1)).squeeze(1) * (1 - dones)
 
-        loss = (rewards + self.gamma * target_q_values - q_values) ** 2
-        loss *= 0.5
-        loss = torch.mean(loss, dim=0, keepdim=False)
+        
+        loss = self.loss(rewards, q_values, gamma_multiplier)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -401,6 +433,7 @@ if __name__ == "__main__":
     # B11030001
     parser.add_argument("--task", type=int, default=2)
     parser.add_argument("--episodes", type=int, default=1000)
+    parser.add_argument("--dqn-type",type=str, default="DQN")
 
     args = parser.parse_args()
 
