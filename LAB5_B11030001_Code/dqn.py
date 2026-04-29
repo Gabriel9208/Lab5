@@ -372,10 +372,10 @@ class DQNAgent:
 
         # Convert the states, actions, rewards, next_states, and dones into torch tensors
         # NOTE: Enable this part after you finish the mini-batch sampling
-        # B11030001: 
+        # B11030001
         if self.task != 1:
-            states = torch.from_numpy(np.array(states, dtype=np.float32)).to(self.device) / 255.0
-            next_states = torch.from_numpy(np.array(next_states, dtype=np.float32)).to(self.device) / 255.0
+            states = torch.from_numpy(np.array(states)).float().to(self.device) / 255.0
+            next_states = torch.from_numpy(np.array(next_states)).float().to(self.device) / 255.0
         else:
             states = torch.from_numpy(np.array(states).astype(np.float32)).to(self.device)
             next_states = torch.from_numpy(np.array(next_states).astype(np.float32)).to(self.device)
@@ -388,7 +388,6 @@ class DQNAgent:
         # Implement the loss function of DQN and the gradient updates 
         
         # B11030001
-        
         with torch.no_grad():
             if self.dqn_type == "DQN":
                 target_q_values = self.target_net(next_states).max(dim=1)[0]
