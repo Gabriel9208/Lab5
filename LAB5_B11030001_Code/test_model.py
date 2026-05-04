@@ -11,71 +11,84 @@ import os
 from collections import deque
 import argparse
 
-class DQN(nn.Module):
-    def __init__(self, input_channels, num_actions):
-        super(DQN, self).__init__()
+class FCNDQN(nn.Module):
+    def __init__(self, num_actions):
+        super(FCNDQN, self).__init__()
+        # An example: 
+        #self.network = nn.Sequential(
+        #    nn.Linear(input_dim, 64),
+        #    nn.ReLU(),
+        #    nn.Linear(64, 64),
+        #    nn.ReLU(),
+        #    nn.Linear(64, num_actions)
+        #)       
+        ########## YOUR CODE HERE (5~10 lines) ##########
+
+        # B11030001
         self.network = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=8, stride=4),
+            nn.Linear(4, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_actions)
+        )       
+        ########## END OF YOUR CODE ##########
+
+    def forward(self, x):
+        return self.network(x)
+
+class CNNDQN(nn.Module):
+    def __init__(self, num_actions):
+        super(CNNDQN, self).__init__()
+       
+        # B11030001
+        self.network = nn.Sequential(
+            nn.Conv2d(4, 32, kernel_size=8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 7 * 7, 512),
+            nn.Linear(64 * 7 * 7, 512),  # 64 x 7 x 7 = 3136
             nn.ReLU(),
             nn.Linear(512, num_actions)
-        )
+        )       
 
     def forward(self, x):
-        return self.network(x / 255.0)
-class AtariPreprocessor:
-    def __init__(self, frame_stack=4):
-        self.frame_stack = frame_stack
-        self.frames = deque(maxlen=frame_stack)
+        return self.network(x)
 
-    def preprocess(self, obs):
-        if len(obs.shape) == 3 and obs.shape[2] == 3:
-            gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = obs
-        resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
-        return resized
-
-    def reset(self, obs):
-        frame = self.preprocess(obs)
-        self.frames = deque([frame for _ in range(self.frame_stack)], maxlen=self.frame_stack)
-        return np.stack(self.frames, axis=0)
-
-    def step(self, obs):
-        frame = self.preprocess(obs)
-        self.frames.append(frame.copy())
-        stacked = np.stack(self.frames, axis=0)
-        return stacked
         
-def evaluate(args):
+def evaluate(args, seed):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-    env = gym.make("ALE/Pong-v5", render_mode="rgb_array")
-    env.action_space.seed(args.seed)
-    env.observation_space.seed(args.seed)
+    if args.task == 1:
+        env = gym.make("CartPole-v1", render_mode="rgb_array")
+    else:
+        env = gym.make("ALE/Pong-v5", render_mode="rgb_array")
+        
+    env.action_space.seed(seed)
+    env.observation_space.seed(seed)
 
-    preprocessor = AtariPreprocessor()
     num_actions = env.action_space.n
 
-    model = DQN(4, num_actions).to(device)
+    if args.task == 1:
+        model = FCNDQN(num_actions).to(device)
+    else:        
+        model = CNNDQN(num_actions).to(device)
+        
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    for ep in range(args.episodes):
-        obs, _ = env.reset(seed=args.seed + ep)
-        state = preprocessor.reset(obs)
+    for ep in range(1):
+        obs, _ = env.reset(seed=seed + ep)
+        state = obs
         done = False
         total_reward = 0
         frames = []
@@ -92,7 +105,7 @@ def evaluate(args):
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             total_reward += reward
-            state = preprocessor.step(next_obs)
+            state = next_obs
             frame_idx += 1
 
         out_path = os.path.join(args.output_dir, f"eval_ep{ep}.mp4")
@@ -103,9 +116,10 @@ def evaluate(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--task", type=int, default=1, help="task 1 or 2")
     parser.add_argument("--model-path", type=str, required=True, help="Path to trained .pt model")
     parser.add_argument("--output-dir", type=str, default="./eval_videos")
-    parser.add_argument("--episodes", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=313551076, help="Random seed for evaluation")
     args = parser.parse_args()
-    evaluate(args)
+
+    for seed in range(20):
+        evaluate(args)

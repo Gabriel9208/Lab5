@@ -27,12 +27,6 @@ def init_weights(m):
             nn.init.constant_(m.bias, 0)
 
 class FCNDQN(nn.Module):
-    """
-        Design the architecture of your deep Q network
-        - Input size is the same as the state dimension; the output size is the same as the number of actions
-        - Feel free to change the architecture (e.g. number of hidden layers and the width of each hidden layer) as you like
-        - Feel free to add any member variables/functions whenever needed
-    """
     def __init__(self, num_actions):
         super(FCNDQN, self).__init__()
         # An example: 
@@ -59,24 +53,9 @@ class FCNDQN(nn.Module):
         return self.network(x)
 
 class CNNDQN(nn.Module):
-    """
-        Design the architecture of your deep Q network
-        - Input size is the same as the state dimension; the output size is the same as the number of actions
-        - Feel free to change the architecture (e.g. number of hidden layers and the width of each hidden layer) as you like
-        - Feel free to add any member variables/functions whenever needed
-    """
     def __init__(self, num_actions):
         super(CNNDQN, self).__init__()
-        # An example: 
-        #self.network = nn.Sequential(
-        #    nn.Linear(input_dim, 64),
-        #    nn.ReLU(),
-        #    nn.Linear(64, 64),
-        #    nn.ReLU(),
-        #    nn.Linear(64, num_actions)
-        #)       
-        ########## YOUR CODE HERE (5~10 lines) ##########
-
+       
         # B11030001
         self.network = nn.Sequential(
             nn.Conv2d(4, 32, kernel_size=8, stride=4),
@@ -90,18 +69,22 @@ class CNNDQN(nn.Module):
             nn.ReLU(),
             nn.Linear(512, num_actions)
         )       
-        ########## END OF YOUR CODE ##########
 
     def forward(self, x):
         return self.network(x)
+
 
 class DQNLoss(nn.Module):
     def __init__(self, gamma):
         super().__init__()
         self.gamma = gamma
-    def forward(self, rewards, q_values, gamma_multiplier):
+    def forward(self, rewards, q_values, gamma_multiplier, weights=None):
         loss = (rewards + self.gamma * gamma_multiplier - q_values) ** 2
         loss *= 0.5
+
+        if weights is not None:
+            loss = loss * weights
+
         loss = torch.mean(loss, dim=0, keepdim=False)
 
         return loss
@@ -130,35 +113,114 @@ class AtariPreprocessor:
         self.frames.append(frame)
         return np.stack(self.frames, axis=0)
 
+# B11030001
+class SumTree():
+    def __init__(self, capacity):
+        self.tree = np.zeros((2 * capacity - 1, ), dtype=np.float32)
+        self.capacity = capacity
+
+    def _propagate(self, index, value):
+        while index > 0:
+            index = (index - 1) // 2
+            self.tree[index] += value
+
+    def add(self, idx, value):
+        if not (0 <= idx < self.capacity):
+            raise ValueError(f"The idx {idx} is out of range [0, {self.capacity - 1}]")
+        idx += self.capacity - 1
+        dummy = self.tree[idx]
+        self.tree[idx] = value
+
+        self._propagate(idx, value - dummy)
+
+    def update(self, idx, priority):
+        self.add(idx, priority)
+
+    def sample(self, value):
+        idx = 0
+        while idx < self.capacity - 1:
+            left = 2 * idx + 1
+            right = 2 * idx + 2
+            if left >= len(self.tree):
+                break
+            if self.tree[left] >= value:
+                idx = left
+            else:
+                idx = right
+                value -= self.tree[left]
+        return idx - (self.capacity - 1), self.tree[idx]
+
+    def get_total_priority(self):
+        return self.tree[0]   
+
+    def get_max_priority(self):
+        return np.max(self.tree[self.capacity - 1:])
+
 
 class PrioritizedReplayBuffer:
     """
         Prioritizing the samples in the replay memory by the Bellman error
         See the paper (Schaul et al., 2016) at https://arxiv.org/abs/1511.05952
     """ 
-    def __init__(self, capacity, alpha=0.6, beta=0.4):
+    def __init__(self, capacity, alpha=0.6, beta=0.4, beta_steps=3000000):
         self.capacity = capacity
         self.alpha = alpha
         self.beta = beta
+        self.beta_steps = beta_steps
         self.buffer = []
-        self.priorities = np.zeros((capacity,), dtype=np.float32)
+
+        # B11030001
+        self.priorities = SumTree(capacity)
+        self.max_priority = 1.0
         self.pos = 0
 
-    def add(self, transition, error):
+    def __len__(self):
+        return len(self.buffer)
+
+    def add(self, transition):
         ########## YOUR CODE HERE (for Task 3) ########## 
-                    
+        if len(self.buffer) < self.pos + 1:
+            self.buffer.append(transition)
+        else:
+            self.buffer[self.pos] = transition
+        self.priorities.add(self.pos, self.max_priority)
+        self.pos = (self.pos + 1) % self.capacity
         ########## END OF YOUR CODE (for Task 3) ########## 
-        return 
+        return  
+
     def sample(self, batch_size):
         ########## YOUR CODE HERE (for Task 3) ########## 
-                    
+        value = np.random.uniform(0, 
+                                  self.priorities.get_total_priority(),
+                                  size=batch_size)
+        indices = []
+        priorities = []
+        n = len(self.buffer)
+        for v in value:
+            idx, priority = self.priorities.sample(v)
+            if idx >= n or idx < 0:
+                idx = np.random.randint(0, n)
+                priority = self.priorities.tree[idx + self.capacity - 1]
+            indices.append(idx)
+            priorities.append(priority)
+        data = [self.buffer[i] for i in indices]
+        priorities = np.array(priorities)
+        
         ########## END OF YOUR CODE (for Task 3) ########## 
-        return
+        return indices, data, priorities
+        
     def update_priorities(self, indices, errors):
         ########## YOUR CODE HERE (for Task 3) ########## 
-                    
+        for idx, error in zip(indices, errors):
+            priority = (abs(error) + 1e-7)**self.alpha
+            self.priorities.update(idx, priority)
+            if priority > self.max_priority:
+                self.max_priority = priority
         ########## END OF YOUR CODE (for Task 3) ########## 
         return
+
+    def update_beta(self, train_count):
+        self.beta = min(1.0, 0.4 + (1.0 - 0.4) * train_count / self.beta_steps)
         
 
 class DQNAgent:
@@ -196,11 +258,12 @@ class DQNAgent:
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=args.lr)
 
         self.batch_size = args.batch_size
-        self.gamma = args.discount_factor
         self.epsilon = args.epsilon_start
         self.epsilon_decay = args.epsilon_decay
         self.epsilon_min = args.epsilon_min
 
+        self.base_gamma = args.discount_factor
+        self.gamma = args.discount_factor ** args.msre_step if args.msre else args.discount_factor
         self.loss = DQNLoss(self.gamma)
 
         self.env_count = 0
@@ -214,10 +277,21 @@ class DQNAgent:
         os.makedirs(self.save_dir, exist_ok=True)
 
         # B11030001
-        if self.task == 3:
-            self.memory = PrioritizedReplayBuffer(args.memory_size)
+        self.per = args.per
+        self.beta_steps = args.beta_steps
+        if self.per:
+            self.memory = PrioritizedReplayBuffer(args.memory_size, beta_steps=self.beta_steps)
         else:
             self.memory = deque(maxlen=args.memory_size)
+
+        self.wandb_run_name = args.wandb_run_name
+
+        # B11030001
+        self.msre = args.msre
+        if self.msre:
+            self.msre_steps = args.msre_step
+            self.msre_buffer = deque(maxlen=self.msre_steps)
+        
 
     def select_action(self, state):
         if random.random() < self.epsilon:
@@ -225,13 +299,42 @@ class DQNAgent:
 
         # B11030001
         if self.task != 1:
-            state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device) / 255.0
+            state_tensor = torch.from_numpy(np.array(state))\
+                            .float().unsqueeze(0).to(self.device) / 255.0
         else:
-            state_tensor = torch.from_numpy(np.array(state)).float().unsqueeze(0).to(self.device)
+            state_tensor = torch.from_numpy(np.array(state))\
+                            .float().unsqueeze(0).to(self.device)
             
         with torch.no_grad():
             q_values = self.q_net(state_tensor)
         return q_values.argmax().item()
+
+    def _store_transition(self, transition):
+        s, a, r, ns, d = transition
+        
+        if self.per:
+            self.memory.add((s, a, r, ns, d))
+        else:
+            self.memory.append((s, a, r, ns, d))
+
+    def _multi_step_return(self):
+        accumulated_reward = 0
+        s_first, a_first, r_first, ns_first, d_first = self.msre_buffer.popleft()
+        accumulated_reward += r_first
+        next_state_final = ns_first
+        done_final = d_first
+
+        for i, (_, _, r, ns, d) in enumerate(self.msre_buffer):
+            accumulated_reward += (self.base_gamma ** (i + 1)) *r
+            next_state_final = ns
+            done_final = d
+            
+        self._store_transition((s_first, 
+                                a_first, 
+                                accumulated_reward, 
+                                next_state_final, 
+                                done_final))
+
 
     def run(self, episodes=1000):
         for ep in range(episodes):
@@ -258,7 +361,19 @@ class DQNAgent:
                 else:
                     next_state = next_obs
 
-                self.memory.append((state, action, reward, next_state, done))
+                # B11030001
+                if self.msre: 
+                    self.msre_buffer.append((state, action, reward, next_state, done))
+
+                    if len(self.msre_buffer) == self.msre_steps or done:
+                        self._multi_step_return()
+
+                        if done:
+                            while len(self.msre_buffer) > 0:
+                                self._multi_step_return()
+
+                else:
+                    self._store_transition((state, action, reward, next_state, done))
 
                 for _ in range(self.train_per_step):
                     self.train()
@@ -294,15 +409,20 @@ class DQNAgent:
             
             ########## END OF YOUR CODE ##########  
             if ep % 100 == 0:
-                model_path = os.path.join(self.save_dir, f"task{self.task}_model_ep{ep}.pt")
+                model_path = os.path.join(self.save_dir, f"{self.wandb_run_name}_model_ep{ep}.pt")
                 torch.save(self.q_net.state_dict(), model_path)
                 print(f"Saved model checkpoint to {model_path}")
 
+            if self.task == 3 and self.env_count in (600_000, 1_000_000, 1_500_000, 2_000_000, 2_500_000):
+                model_path = os.path.join(self.save_dir, f"{self.wandb_run_name}_model_{self.env_count}steps.pt")
+                torch.save(self.q_net.state_dict(), model_path)
+                print(f"Saved model checkpoint to {model_path}")
+                
             if ep % 20 == 0:
                 eval_reward = self.evaluate()
                 if eval_reward > self.best_reward:
                     self.best_reward = eval_reward
-                    model_path = os.path.join(self.save_dir, f"task{self.task}_best_model.pt")
+                    model_path = os.path.join(self.save_dir, f"{self.wandb_run_name}_best_model.pt")
                     torch.save(self.q_net.state_dict(), model_path)
                     print(f"Saved new best model to {model_path} with reward {eval_reward}")
                 print(f"[TrueEval] Ep: {ep} Eval Reward: {eval_reward:.2f} SC: {self.env_count} UC: {self.train_count}")
@@ -361,8 +481,12 @@ class DQNAgent:
         # Sample a mini-batch of (s,a,r,s',done) from the replay buffer
 
         # B11030001
-        if self.task == 3:
-            mini_batch = self.memory.sample(self.batch_size)
+        if self.per:
+            indices, mini_batch, priorities = self.memory.sample(self.batch_size)
+            priorities = torch.from_numpy(priorities).float().to(self.device) /\
+                         self.memory.priorities.get_total_priority()
+            weights = torch.pow(len(self.memory) * priorities, -self.memory.beta) 
+            weights = weights / weights.max()
         else:
             mini_batch = random.sample(self.memory, self.batch_size)
 
@@ -386,22 +510,32 @@ class DQNAgent:
         
         ########## YOUR CODE HERE (~10 lines) ##########
         # Implement the loss function of DQN and the gradient updates 
-        
+
         # B11030001
         with torch.no_grad():
             if self.dqn_type == "DQN":
                 target_q_values = self.target_net(next_states).max(dim=1)[0]
                 gamma_multiplier = target_q_values * (1 - dones)
-            else:
+            else: # DDQN
                 target_actions = self.q_net(next_states).argmax(dim=1)
-                gamma_multiplier = self.target_net(next_states).gather(1, target_actions.unsqueeze(1)).squeeze(1) * (1 - dones)
-
+                gamma_multiplier = self.target_net(next_states)\
+                    .gather(1, target_actions.unsqueeze(1))\
+                    .squeeze(1) * (1 - dones)            
         
-        loss = self.loss(rewards, q_values, gamma_multiplier)
+        if self.per: # PER
+            errors_td = rewards + self.gamma * gamma_multiplier - q_values
+            errors = errors_td.abs().detach().cpu().numpy()
+            self.memory.update_priorities(indices, errors)
+            loss = self.loss(rewards, q_values, gamma_multiplier, weights)
+        else:
+            loss = self.loss(rewards, q_values, gamma_multiplier)
 
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        
+        if self.per:
+            self.memory.update_beta(self.train_count)
         
       
         ########## END OF YOUR CODE ##########  
@@ -433,7 +567,13 @@ if __name__ == "__main__":
     # B11030001
     parser.add_argument("--task", type=int, default=2)
     parser.add_argument("--episodes", type=int, default=1000)
-    parser.add_argument("--dqn-type",type=str, default="DQN")
+    parser.add_argument("--dqn-type",type=str, default="DQN") # DQN/DDQN
+    parser.add_argument('--per', action='store_true') # Prioritized Experience Replay
+    parser.add_argument('--beta-steps', type=int, default=3000000) # Dueling DQN
+    parser.add_argument('--msre', action='store_true') # Multi Step Returns
+    parser.add_argument('--msre-step', type=int, default=1) # Multi Step Returns
+    
+    
 
     args = parser.parse_args()
 

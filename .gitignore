@@ -11,3 +11,4 @@ wheels/
 
 wandb/
 results/
+eval_videos/
